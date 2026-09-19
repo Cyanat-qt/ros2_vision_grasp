@@ -1,0 +1,69 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Derived and modified for this project: RGB-D grasp scene with 3 cm colored cubes.
+     Based on MuJoCo Menagerie/franka_fr3; see LICENSE and NOTICE. -->
+<mujoco model="fr3 scene">
+  <include file="fr3.xml" />
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
+    <rgba haze="0.15 0.25 0.35 1" />
+    <global azimuth="120" elevation="-20" />
+  </visual>
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072" />
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2" />
+    <material name="table_material" rgba="0.878 0.933 0.878 1" />
+    <material name="red_block" rgba="1 0 0 1" />
+    <material name="blue_block" rgba="0 0.2 1 1" />
+    <material name="green_block" rgba="0 0.8 0.1 1" />
+    <material name="yellow_block" rgba="1 0.8 0 1" />
+  </asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane" />
+    <light name="main_light" pos="0 0 3" dir="0 0 -1" directional="true" />
+    <body name="table" pos="0.85 0 0.025">
+      <geom name="table_top" type="box" size="0.7 0.6 0.025" material="table_material" />
+    </body>
+    <body name="red_object" pos="0.45 0.0 0.065">
+      <freejoint />
+      <geom name="red_object_geom" type="box" size=".015 .015 .015" material="red_block" mass=".025" friction="1.2 0.01 0.001" condim="4" />
+    </body>
+    <body name="blue_object" pos="0.58 0.14 0.065">
+      <freejoint />
+      <geom name="blue_object_geom" type="box" size=".015 .015 .015" material="blue_block" mass=".025" friction="1.2 0.01 0.001" condim="4" />
+    </body>
+    <body name="green_object" pos="0.48 -0.16 0.065">
+      <freejoint />
+      <geom name="green_object_geom" type="box" size=".015 .015 .015" material="green_block" mass=".025" friction="1.2 0.01 0.001" condim="4" />
+    </body>
+    <body name="left_red_box" pos="0.35 -0.42 0.055">
+      <geom name="left_red_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="red_block" />
+      <geom name="left_red_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="red_block" />
+      <geom name="left_red_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="red_block" />
+      <geom name="left_red_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="red_block" />
+      <geom name="left_red_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="red_block" />
+    </body>
+    <body name="left_yellow_box" pos="0.60 -0.42 0.055">
+      <geom name="left_yellow_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="yellow_block" />
+      <geom name="left_yellow_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="yellow_block" />
+      <geom name="left_yellow_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="yellow_block" />
+      <geom name="left_yellow_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="yellow_block" />
+      <geom name="left_yellow_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="yellow_block" />
+    </body>
+    <body name="right_green_box" pos="0.35 0.42 0.055">
+      <geom name="right_green_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="green_block" />
+      <geom name="right_green_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="green_block" />
+      <geom name="right_green_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="green_block" />
+      <geom name="right_green_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="green_block" />
+      <geom name="right_green_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="green_block" />
+    </body>
+    <body name="right_blue_box" pos="0.60 0.42 0.055">
+      <geom name="right_blue_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="blue_block" />
+      <geom name="right_blue_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="blue_block" />
+      <geom name="right_blue_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="blue_block" />
+      <geom name="right_blue_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="blue_block" />
+      <geom name="right_blue_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="blue_block" />
+    </body>
+    <camera name="top_camera" pos=".50 0 1.25" mode="fixed" euler="0 0 0" fovy="50" />
+  </worldbody>
+</mujoco>

@@ -1,0 +1,222 @@
+<!-- Modified for this project: table, colored objects, containers and camera.
+     Based on MuJoCo Menagerie/franka_fr3; see LICENSE and NOTICE. -->
+<mujoco model="fr3 scene"> 
+ 
+  <!-- ========================================================= 
+       1. 加载 FR3 + Gripper 
+       ========================================================= --> 
+  <include file="fr3.xml"/> 
+ 
+ 
+  <!-- ========================================================= 
+       2. Visual 
+       ========================================================= --> 
+  <visual> 
+ 
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/> 
+ 
+    <rgba haze="0.15 0.25 0.35 1"/> 
+ 
+    <global azimuth="120" elevation="-20"/> 
+ 
+  </visual> 
+ 
+ 
+  <!-- ========================================================= 
+       3. Assets 
+       ========================================================= --> 
+  <asset> 
+ 
+    <!-- Sky --> 
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/> 
+ 
+    <!-- Ground --> 
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/> 
+ 
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/> 
+ 
+ 
+    <!-- Table --> 
+    <material name="table_material" rgba="0.878 0.933 0.878 1"/> 
+ 
+ 
+    <!-- Objects --> 
+    <material name="red_block" rgba="1 0 0 1"/> 
+    <material name="blue_block" rgba="0 0.2 1 1"/> 
+    <material name="green_block" rgba="0 0.8 0.1 1"/> 
+    <material name="yellow_block" rgba="1 0.8 0 1"/> 
+ 
+  </asset> 
+ 
+ 
+  <!-- ========================================================= 
+       4. World 
+       ========================================================= --> 
+  <worldbody> 
+ 
+    <!-- Ground --> 
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"/> 
+ 
+ 
+    <!-- Light --> 
+    <light name="main_light" pos="0 0 3" dir="0 0 -1" directional="true"/> 
+ 
+ 
+    <!-- ======================================================= 
+         Table Top 
+         ======================================================= --> 
+    <body name="table" pos="0.85 0 0.025"> 
+ 
+      <geom name="table_top" type="box" size="0.7 0.6 0.025" material="table_material"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Red movable object 
+         ======================================================= --> 
+    <body name="red_object" pos="0.6 0.15 0.09"> 
+ 
+      <freejoint/> 
+ 
+      <geom name="red_object_geom" type="box" size="0.04 0.04 0.04" material="red_block" mass="0.05" friction="1 0.005 0.0001"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Blue movable object 
+         ======================================================= --> 
+    <body name="blue_object" pos="0.8 0.15 0.09"> 
+ 
+      <freejoint/> 
+ 
+      <geom name="blue_object_geom" type="box" size="0.04 0.04 0.04" material="blue_block" mass="0.05" friction="1 0.005 0.0001"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Green movable object 
+         ======================================================= --> 
+    <body name="green_object" pos="0.3 -0.20 0.09"> 
+ 
+      <freejoint/> 
+ 
+      <geom name="green_object_geom" type="box" size="0.04 0.04 0.04" material="green_block" mass="0.05" friction="1 0.005 0.0001"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Left Red Box
+         16cm x 16cm
+         Wall thickness = 5mm
+         Deep recessed bottom
+         ======================================================= --> 
+    <body name="left_red_box" pos="0.35 -0.42 0.055"> 
+ 
+      <!-- Bottom: 2mm thick --> 
+      <geom name="left_red_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="red_block"/> 
+ 
+      <!-- Front wall: 5mm thick, 10cm high --> 
+      <geom name="left_red_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="red_block"/> 
+ 
+      <!-- Back wall: 5mm thick, 10cm high --> 
+      <geom name="left_red_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="red_block"/> 
+ 
+      <!-- Left wall: 5mm thick, 10cm high --> 
+      <geom name="left_red_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="red_block"/> 
+ 
+      <!-- Right wall: 5mm thick, 10cm high --> 
+      <geom name="left_red_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="red_block"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Left Yellow Box
+         16cm x 16cm
+         Wall thickness = 5mm
+         Deep recessed bottom
+         ======================================================= --> 
+    <body name="left_yellow_box" pos="0.60 -0.42 0.055"> 
+ 
+      <!-- Bottom: 2mm thick --> 
+      <geom name="left_yellow_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="yellow_block"/> 
+ 
+      <!-- Front wall: 5mm thick, 10cm high --> 
+      <geom name="left_yellow_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="yellow_block"/> 
+ 
+      <!-- Back wall: 5mm thick, 10cm high --> 
+      <geom name="left_yellow_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="yellow_block"/> 
+ 
+      <!-- Left wall: 5mm thick, 10cm high --> 
+      <geom name="left_yellow_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="yellow_block"/> 
+ 
+      <!-- Right wall: 5mm thick, 10cm high --> 
+      <geom name="left_yellow_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="yellow_block"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Right Green Box
+         16cm x 16cm
+         Wall thickness = 5mm
+         Deep recessed bottom
+         ======================================================= --> 
+    <body name="right_green_box" pos="0.35 0.42 0.055"> 
+ 
+      <!-- Bottom: 2mm thick --> 
+      <geom name="right_green_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="green_block"/> 
+ 
+      <!-- Front wall: 5mm thick, 10cm high --> 
+      <geom name="right_green_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="green_block"/> 
+ 
+      <!-- Back wall: 5mm thick, 10cm high --> 
+      <geom name="right_green_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="green_block"/> 
+ 
+      <!-- Left wall: 5mm thick, 10cm high --> 
+      <geom name="right_green_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="green_block"/> 
+ 
+      <!-- Right wall: 5mm thick, 10cm high --> 
+      <geom name="right_green_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="green_block"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Right Blue Box
+         16cm x 16cm
+         Wall thickness = 5mm
+         Deep recessed bottom
+         ======================================================= --> 
+    <body name="right_blue_box" pos="0.60 0.42 0.055"> 
+ 
+      <!-- Bottom: 2mm thick --> 
+      <geom name="right_blue_box_bottom" type="box" size="0.08 0.08 0.001" pos="0 0 0.001" material="blue_block"/> 
+ 
+      <!-- Front wall: 5mm thick, 10cm high --> 
+      <geom name="right_blue_box_front" type="box" size="0.08 0.0025 0.05" pos="0 -0.0775 0.05" material="blue_block"/> 
+ 
+      <!-- Back wall: 5mm thick, 10cm high --> 
+      <geom name="right_blue_box_back" type="box" size="0.08 0.0025 0.05" pos="0 0.0775 0.05" material="blue_block"/> 
+ 
+      <!-- Left wall: 5mm thick, 10cm high --> 
+      <geom name="right_blue_box_left" type="box" size="0.0025 0.075 0.05" pos="-0.0775 0 0.05" material="blue_block"/> 
+ 
+      <!-- Right wall: 5mm thick, 10cm high --> 
+      <geom name="right_blue_box_right" type="box" size="0.0025 0.075 0.05" pos="0.0775 0 0.05" material="blue_block"/> 
+ 
+    </body> 
+ 
+ 
+    <!-- ======================================================= 
+         Fixed Camera 
+         ======================================================= --> 
+    <camera name="top_camera" pos="0.85 0 2.0" mode="fixed" euler="0 0 0" fovy="60"/> 
+ 
+  </worldbody> 
+ 
+</mujoco>
