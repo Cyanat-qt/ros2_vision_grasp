@@ -2,9 +2,9 @@
 
 A Franka FR3 grasping demo based on **ROS 2 Humble + MoveIt 2 + MuJoCo**:
 
-**RGB-D Camera → OpenCV Color Detection → 3D Localization → Motion Planning → Physical Contact Grasping**
+**RGB-D Camera → OpenCV Color Detection → 3D Localization → Motion Planning → Physical Contact Grasping → Placement**
 
-Currently supports red, green, and blue **3 cm blocks** using a fixed overhead camera. This project is for simulation only.
+Currently supports red, green, and blue **3 cm blocks** using a fixed overhead camera. One start request sorts all visible tabletop blocks into matching bins. The arm returns to its initial posture after each placement, checks for remaining blocks, and stays at home when the table is empty. This project is for simulation only.
 
 ## Run
 
@@ -25,9 +25,9 @@ ros2 service call /pick/start std_srvs/srv/Trigger '{}'
 ros2 topic echo /pick/status --qos-durability transient_local
 ```
 
-Call `/pick/reset` before starting another grasping task.
+Call `/pick/start` once for the entire table. Use `/pick/reset` only to restore the scene for another complete trial.
 
-To select a specific color:
+The default order is red, green, blue. To choose the first color (the others are still sorted automatically):
 
 ```bash
 bash scripts/run_demo.sh color:=green

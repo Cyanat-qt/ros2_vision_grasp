@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run against an isolated demo, measure vision, and verify real contact/lift.
+"""Run against an isolated demo and verify physical grasp, transport and placement.
 
 Source ROS and the workspace first. --launch starts and owns a fresh demo.
 Simulation object truth is consumed only by this evaluator, never as a target.
@@ -23,6 +23,7 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, CameraInfo, JointState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from fr3_vision_grasp.core import ARM, HOME
 
 
 class Evaluator(Node):
@@ -32,6 +33,8 @@ class Evaluator(Node):
         self.counts = {}
         self.events = []
         self.subs = []
+        self.carry_samples = {c: [] for c in ('red', 'green', 'blue')}
+        self.home_visits = []
         topics = [(Image, '/camera/color/image_raw', 'rgb'),
                   (Image, '/camera/depth/image_raw', 'depth'),
                   (CameraInfo, '/camera/color/camera_info', 'info'),
@@ -48,11 +51,22 @@ class Evaluator(Node):
     def receive(self, key, msg):
         self.latest[key] = json.loads(msg.data) if key == 'metrics' else msg
         self.counts[key] = self.counts.get(key, 0) + 1
+        status = self.latest.get('status', {})
+        if key == 'metrics' and status.get('state') == 'TRANSPORTING':
+            color = status['color']
+            self.carry_samples[color].append(self.latest[key]['objects'][color])
 
     def on_status(self, msg):
         status = json.loads(msg.data)
         self.latest['status'] = status
         self.events.append(status)
+        # DETECTING persists while collecting fresh frames at home. Very brief
+        # intermediate statuses can be coalesced by the depth-1 status topic.
+        if status['state'] == 'DETECTING' and 'joints' in self.latest:
+            joints = self.latest['joints']
+            positions = np.array([joints.position[joints.name.index(n)] for n in ARM])
+            self.home_visits.append({'placed_colors': status['placed_colors'],
+                                    'max_joint_error_rad': float(np.max(np.abs(positions - HOME)))})
         print(status['state'] + ': ' + status['message'], flush=True)
 
     def until(self, predicate, timeout=30):
@@ -90,7 +104,7 @@ class Evaluator(Node):
             for c in ('red', 'green', 'blue'):
                 self.latest.pop(c, None)
         self.until(lambda: all(k in self.latest for k in
-            ('rgb', 'depth', 'info', 'annotated', 'joints', 'metrics', 'red', 'green', 'blue')))
+            ('rgb', 'depth', 'info', 'annotated', 'joints', 'metrics', 'red', 'green', 'blue')), 60)
         started = time.monotonic()
         first_count = self.counts.copy()
         sim_start = self.latest['metrics']['sim_time']
@@ -110,30 +124,60 @@ class Evaluator(Node):
         assert self.latest['depth'].encoding == '32FC1'
         assert len(self.latest['joints'].position) == 9
         self.capture(directory, f'trial_{index}_before')
-        initial_z = self.latest['metrics']['objects'][color]['position'][2]
-        initial_q = np.array(self.latest['joints'].position[:7])
+        initial_z = {c: obj['position'][2] for c, obj in self.latest['metrics']['objects'].items()}
         report = {'vision_error_m': errors, 'wall_topic_rates_hz': rates,
                   'simulation_speed': (self.latest['metrics']['sim_time'] - sim_start) / wall_duration}
         self.events.clear()
+        for samples in self.carry_samples.values():
+            samples.clear()
+        self.home_visits.clear()
         self.latest.pop('status', None)
         self.service('/pick/start')
         self.until(lambda: self.latest.get('status', {}).get('state') in
-                   ('SUCCEEDED', 'FAILED', 'CANCELED'), 180)
+                   ('SUCCEEDED', 'FAILED', 'CANCELED'), 900)
         assert self.latest['status']['state'] == 'SUCCEEDED', self.latest['status']
-        # Check sustained contact after the task has reported success.
+        order = [color, *[c for c in ('red', 'green', 'blue') if c != color]]
+        assert self.latest['status']['placed_colors'] == order
+        assert len(self.home_visits) == 4, self.home_visits
+        for count, visit in enumerate(self.home_visits):
+            assert visit['placed_colors'] == order[:count], visit
+            assert visit['max_joint_error_rad'] < 0.02, visit
+        min_lift = {}
+        for c, samples in self.carry_samples.items():
+            assert samples, f'No transport measurements for {c}'
+            min_lift[c] = min(obj['position'][2] - initial_z[c] for obj in samples)
+            assert min_lift[c] > 0.05, (c, min_lift[c])
+            assert all(len(obj['contacts']) == 2 for obj in samples), f'Lost {c} during transport'
+        expected_xy = {'red': [0.35, -0.42], 'green': [0.35, 0.42], 'blue': [0.60, 0.42]}
+        # All three cubes remain placed, while the arm stays at HOME after success.
         start_sim = self.latest['metrics']['sim_time']
-        min_lift = float('inf')
+        positions = {c: [] for c in order}
+        joint_positions = []
+        event_count = len(self.events)
         deadline = time.monotonic() + 20
         while self.latest['metrics']['sim_time'] - start_sim < 2:
-            assert time.monotonic() < deadline, 'Simulation stalled after lift'
+            assert time.monotonic() < deadline, 'Simulation stalled after placement'
             rclpy.spin_once(self, timeout_sec=0.1)
-            obj = self.latest['metrics']['objects'][color]
-            min_lift = min(min_lift, obj['position'][2] - initial_z)
-            assert len(obj['contacts']) == 2, obj
-            assert min_lift > 0.05, obj
-        assert np.max(np.abs(np.array(self.latest['joints'].position[:7]) - initial_q)) > 0.1
+            for c in order:
+                obj = self.latest['metrics']['objects'][c]
+                assert not obj['contacts'], (c, obj)
+                assert np.max(np.abs(np.array(obj['position'][:2]) - expected_xy[c])) < 0.045, (c, obj)
+                assert abs(obj['position'][2] - 0.072) < 0.004, (c, obj)
+                positions[c].append(obj['position'])
+            joints = self.latest['joints']
+            actual = np.array([joints.position[joints.name.index(n)] for n in ARM])
+            assert np.max(np.abs(actual - HOME)) < 0.02, actual
+            joint_positions.append(actual)
+        for c, samples in positions.items():
+            assert np.max(np.ptp(samples, axis=0)) < 0.001, f'{c} is still moving'
+        assert np.max(np.ptp(joint_positions, axis=0)) < 0.001, 'Robot moved after sorting finished'
+        assert len(self.events) == event_count, 'Task restarted after finishing'
+        states = [event['state'] for event in self.events]
+        for state in ('LIFTING', 'TRANSPORTING', 'PLACING', 'RELEASING', 'RETREATING', 'VERIFYING'):
+            assert state in states, states
         self.capture(directory, f'trial_{index}_after')
-        report.update(minimum_lift_m=min_lift, final_object=self.latest['metrics']['objects'][color],
+        report.update(minimum_lift_m=min_lift, final_objects=self.latest['metrics']['objects'],
+                      home_visits=self.home_visits.copy(), final_joint_positions=joint_positions[-1].tolist(),
                       states=self.events.copy(), success=True)
         return report
 
@@ -169,17 +213,23 @@ def main():
         raise
     finally:
         (args.output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-        if node:
-            node.destroy_node()
-        rclpy.shutdown()
-        if process is not None:
-            process.send_signal(signal.SIGINT)
-            try:
-                process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-            log.close()
+        # SIGINT can already have shut down rclpy. Always stop the owned launch
+        # before ROS cleanup so interrupted checks cannot leave duplicate robots.
+        try:
+            if process is not None:
+                if process.poll() is None:
+                    process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+                log.close()
+        finally:
+            if node:
+                node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == '__main__':

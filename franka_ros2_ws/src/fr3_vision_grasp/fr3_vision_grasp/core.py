@@ -8,6 +8,31 @@ FINGERS = ['fr3_finger_joint1', 'fr3_finger_joint2']
 HOME = np.array([0.0, -0.5, 0.0, -2.0, 0.0, 1.5, 0.785398])
 
 
+class EmptyTableConfirmation:
+    """Require distinct, recent, consecutive empty images after reaching home."""
+    def __init__(self, after_ns):
+        self.last_ns = after_ns
+        self.empty_since = None
+        self.empty_count = 0
+
+    def observe(self, stamp_ns, colors):
+        if stamp_ns <= self.last_ns:
+            return
+        if colors or stamp_ns - self.last_ns > 2_000_000_000:
+            self.empty_since = None
+            self.empty_count = 0
+        self.last_ns = stamp_ns
+        if not colors:
+            if self.empty_since is None:
+                self.empty_since = stamp_ns
+            self.empty_count += 1
+
+    def confirmed(self, now_ns):
+        return (self.empty_count >= 5 and self.empty_since is not None and
+                self.last_ns - self.empty_since >= 2_000_000_000 and
+                0 <= now_ns - self.last_ns <= 1_000_000_000)
+
+
 def intrinsics(width, height, fovy):
     f = height / (2 * math.tan(math.radians(fovy) / 2))
     return np.array([[f, 0, (width - 1) / 2],

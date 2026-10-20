@@ -72,10 +72,12 @@ class Perception(Node):
                                                   Time.from_msg(rgb_msg.header.stamp))
         except TransformException as exc:
             self.warn('Waiting for camera TF: ' + str(exc))
-            transform = None
+            # Missing localization must never masquerade as an empty table.
+            return
+        if np.count_nonzero(np.isfinite(depth) & (depth > 0.05)) < depth.size * 0.1:
+            self.warn('Not enough valid depth to observe the table')
+            return
         for region in color_regions(rgb, depth, k):
-            if transform is None:
-                continue
             point = PointStamped()
             point.header = rgb_msg.header
             point.point.x, point.point.y, point.point.z = map(float, region['point'])

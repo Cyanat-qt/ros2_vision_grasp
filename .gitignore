@@ -24,3 +24,20 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# Python virtual environments
+.venv/
+.venv-fr3/
+venv/
+
+# ROS2 workspace build artifacts
+**/build/
+**/install/
+**/log/
+**/build_vision/
+**/install_vision/
+**/log_vision/
+
+# Local validation outputs
+docs/validation/auto_sort.json
+docs/validation/pick_place_fix.json

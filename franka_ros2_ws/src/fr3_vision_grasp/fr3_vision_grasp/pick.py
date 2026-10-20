@@ -1,4 +1,4 @@
-"""Perception-driven MoveIt pick, with separate simulation-only success evaluation."""
+"""Perception-driven MoveIt pick and place, with physical success evaluation."""
 import copy
 import json
 import threading
@@ -17,15 +17,17 @@ from action_msgs.msg import GoalStatus
 from control_msgs.action import GripperCommand
 from geometry_msgs.msg import PoseStamped, Pose, Quaternion
 from moveit_msgs.action import MoveGroup, ExecuteTrajectory
-from moveit_msgs.msg import (Constraints, PositionConstraint, OrientationConstraint,
-    BoundingVolume, MotionPlanRequest, PlanningOptions, PlanningScene, CollisionObject,
+from moveit_msgs.msg import (Constraints, JointConstraint,
+    MotionPlanRequest, PlanningOptions, PlanningScene, CollisionObject,
     AttachedCollisionObject, AllowedCollisionEntry, PlanningSceneComponents)
-from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetCartesianPath
+from moveit_msgs.srv import ApplyPlanningScene, GetPlanningScene, GetCartesianPath, GetPositionIK
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
+from vision_msgs.msg import Detection2DArray
 from tf2_ros import Buffer, TransformListener
 from tf2_geometry_msgs import do_transform_pose
+from .core import ARM, HOME, EmptyTableConfirmation
 
 
 class Pick(Node):
@@ -37,12 +39,19 @@ class Pick(Node):
         self.color = self.get_parameter('color').value
         if self.color not in ('red', 'green', 'blue'):
             raise ValueError('color must be red, green or blue')
+        self.first_color = self.color
+        self.color_order = [self.first_color, *[c for c in ('red', 'green', 'blue') if c != self.first_color]]
+        self.placed_colors = []
         self.size = self.get_parameter('object_size').value
         self.lock = threading.Lock()
         self.busy = False
         self.holding = False
+        self.completed = False
+        self.monitor_grasp = False
+        self.contact_lost_since = None
         self.running = True
         self.samples = {color: deque(maxlen=8) for color in ('red', 'green', 'blue')}
+        self.detection_frames = deque(maxlen=120)
         self.metrics = None
         self.metric_wall = 0.0
         self.active_goal = None
@@ -52,6 +61,7 @@ class Pick(Node):
         self.move = ActionClient(self, MoveGroup, '/move_action')
         self.execute = ActionClient(self, ExecuteTrajectory, '/execute_trajectory')
         self.cartesian = self.create_client(GetCartesianPath, '/compute_cartesian_path')
+        self.ik = self.create_client(GetPositionIK, '/compute_ik')
         self.gripper = ActionClient(self, GripperCommand, '/franka_gripper/gripper_action')
         self.apply_scene = self.create_client(ApplyPlanningScene, '/apply_planning_scene')
         self.get_scene = self.create_client(GetPlanningScene, '/get_planning_scene')
@@ -59,6 +69,7 @@ class Pick(Node):
         self.subs = [self.create_subscription(PoseStamped, f'/perception/{c}/pose',
                     lambda msg, c=c: self.observe(c, msg), 10) for c in self.samples]
         self.create_subscription(String, '/simulation/grasp_metrics', self.on_metrics, 10)
+        self.create_subscription(Detection2DArray, '/perception/detections', self.on_detections, 10)
         self.create_subscription(String, '/perception/pick_request', self.on_request, 10)
         self.create_service(Trigger, '/pick/start', self.start)
         self.create_service(Trigger, '/pick/cancel', self.cancel)
@@ -66,10 +77,12 @@ class Pick(Node):
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.status = self.create_publisher(String, '/pick/status', qos)
         self.worker = None
+        self.scene_xml = Path(get_package_share_directory('fr3_vision_grasp')) / 'scene/scene_grasp.xml'
         self.set_status('READY', 'Waiting for stable detections and /pick/start')
 
     def set_status(self, state, message):
-        self.status.publish(String(data=json.dumps({'state': state, 'message': message, 'color': self.color})))
+        self.status.publish(String(data=json.dumps({'state': state, 'message': message,
+            'color': self.color, 'placed_colors': self.placed_colors.copy()})))
         self.get_logger().info(f'{state}: {message}')
 
     def observe(self, color, msg):
@@ -80,20 +93,24 @@ class Pick(Node):
         self.metrics = json.loads(msg.data)
         self.metric_wall = time.monotonic()
 
+    def on_detections(self, msg):
+        self.detection_frames.append((Time.from_msg(msg.header.stamp).nanoseconds,
+                                      {d.id for d in msg.detections}, time.monotonic()))
+
     def on_request(self, msg):
         if msg.data.strip().lower() == 'pick':
             self.start(Trigger.Request(), Trigger.Response())
 
     def start(self, request, response):
         with self.lock:
-            if self.busy or self.holding:
-                response.message = 'Busy or holding an object. Use /pick/reset before another trial.'
+            if self.busy or self.holding or self.completed:
+                response.message = 'Busy or trial already run. Use /pick/reset before another trial.'
                 return response
             self.busy = True
             self.stop_requested.clear()
         self.worker = threading.Thread(target=self.run_pick, daemon=True)
         self.worker.start()
-        response.success, response.message = True, 'Pick started; monitor /pick/status'
+        response.success, response.message = True, 'Table sorting started; monitor /pick/status'
         return response
 
     def cancel(self, request, response):
@@ -112,13 +129,26 @@ class Pick(Node):
         self.stop_requested.clear()
         def run():
             try:
+                if not self.get_scene.wait_for_service(timeout_sec=10):
+                    raise RuntimeError('get_planning_scene unavailable')
+                current = self.wait(self.get_scene.call_async(GetPlanningScene.Request(
+                    components=PlanningSceneComponents(components=(
+                        PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS |
+                        PlanningSceneComponents.WORLD_OBJECT_NAMES)))), 10).scene
+                target_ids = {'target_' + c for c in self.samples}
+                attached_ids = {a.object.id for a in current.robot_state.attached_collision_objects} & target_ids
+                world_ids = {o.id for o in current.world.collision_objects} & target_ids
                 scene = PlanningScene(is_diff=True)
                 scene.robot_state.is_diff = True
                 scene.robot_state.attached_collision_objects = [AttachedCollisionObject(
-                    object=CollisionObject(id='target_' + self.color, operation=CollisionObject.REMOVE))]
+                    object=CollisionObject(id=name, operation=CollisionObject.REMOVE)) for name in attached_ids]
+                scene.world.collision_objects = [CollisionObject(id=name, operation=CollisionObject.REMOVE)
+                                                for name in world_ids | attached_ids]
                 self.apply(scene)
-                self.allow_touch(False)
-                self.allow_touch(False, ['table_top'])
+                for color in self.samples:
+                    self.allow_touch(False, color=color)
+                    _, support, _, _ = self.destination(color)
+                    self.allow_touch(False, ['table_top', support], color=color)
                 if not self.reset_sim.wait_for_service(timeout_sec=5):
                     raise RuntimeError('Simulation reset service unavailable')
                 result = self.wait(self.reset_sim.call_async(Trigger.Request()), 8)
@@ -126,7 +156,13 @@ class Pick(Node):
                     raise RuntimeError(result.message)
                 for samples in self.samples.values():
                     samples.clear()
+                self.detection_frames.clear()
+                self.placed_colors.clear()
+                self.color = self.first_color
                 self.holding = False
+                self.completed = False
+                self.monitor_grasp = False
+                self.contact_lost_since = None
                 self.set_status('READY', 'Simulation reset; waiting for new images')
             except Exception as exc:
                 self.set_status('FAILED', str(exc))
@@ -144,8 +180,24 @@ class Pick(Node):
                 raise RuntimeError('Task canceled')
             if time.monotonic() >= deadline:
                 raise RuntimeError('ROS request timed out')
+            self.check_grasp()
             time.sleep(0.01)
         return future.result()
+
+    def check_grasp(self):
+        """Abort carrying motions if physical contact is lost; never steer from truth."""
+        if not self.monitor_grasp or not self.get_parameter('verify_simulation').value:
+            return
+        metrics = self.metrics
+        if not metrics or time.monotonic() - self.metric_wall > 2:
+            raise RuntimeError('Grasp monitoring lost fresh simulation feedback')
+        obj = metrics.get('objects', {}).get(self.color)
+        if obj and len(obj['contacts']) == 2:
+            self.contact_lost_since = None
+        elif self.contact_lost_since is None:
+            self.contact_lost_since = metrics['sim_time']
+        elif metrics['sim_time'] - self.contact_lost_since >= 0.3:
+            raise RuntimeError('Object slipped: lost two-finger contact during transport')
 
     def action(self, client, request, timeout=90):
         if not client.wait_for_server(timeout_sec=10):
@@ -199,19 +251,31 @@ class Pick(Node):
             if result.error_code.val != result.error_code.SUCCESS:
                 raise RuntimeError(f'MoveIt Cartesian execution error {result.error_code.val}')
             return
-        position_constraint = PositionConstraint()
-        position_constraint.header.frame_id = 'fr3_link0'
-        position_constraint.link_name, position_constraint.weight = 'fr3_hand_tcp', 1.0
-        position_constraint.constraint_region = BoundingVolume(
-            primitives=[SolidPrimitive(type=SolidPrimitive.SPHERE, dimensions=[0.002])],
-            primitive_poses=[pose])
-        orientation = OrientationConstraint()
-        orientation.header.frame_id, orientation.link_name = 'fr3_link0', 'fr3_hand_tcp'
-        orientation.orientation = pose.orientation
-        orientation.absolute_x_axis_tolerance = orientation.absolute_y_axis_tolerance = 0.015
-        orientation.absolute_z_axis_tolerance = 0.025
-        orientation.weight = 1.0
-        constraints = Constraints(position_constraints=[position_constraint], orientation_constraints=[orientation])
+        # Seed IK from the current robot state. Random pose-goal sampling can
+        # choose a redundant elbow posture that cannot descend to the cube.
+        if not self.ik.wait_for_service(timeout_sec=10):
+            raise RuntimeError('MoveIt IK service unavailable')
+        state_request = GetPlanningScene.Request(components=PlanningSceneComponents(
+            components=PlanningSceneComponents.ROBOT_STATE))
+        state = self.wait(self.get_scene.call_async(state_request), 10).scene.robot_state
+        ik_request = GetPositionIK.Request()
+        ik_request.ik_request.group_name = 'fr3_arm'
+        ik_request.ik_request.ik_link_name = 'fr3_hand_tcp'
+        ik_request.ik_request.robot_state = state
+        ik_request.ik_request.pose_stamped = PoseStamped(pose=pose)
+        ik_request.ik_request.pose_stamped.header.frame_id = 'fr3_link0'
+        ik_request.ik_request.avoid_collisions = True
+        ik_request.ik_request.timeout.sec = 2
+        solution = self.wait(self.ik.call_async(ik_request), 10)
+        if solution.error_code.val != solution.error_code.SUCCESS:
+            raise RuntimeError(f'No collision-free approach IK: {solution.error_code.val}')
+        joints = solution.solution.joint_state
+        self.move_joints([joints.position[joints.name.index(name)] for name in ARM])
+
+    def move_joints(self, positions):
+        constraints = Constraints(joint_constraints=[JointConstraint(
+            joint_name=name, position=float(position), tolerance_above=0.001,
+            tolerance_below=0.001, weight=1.0) for name, position in zip(ARM, positions)])
         request = MotionPlanRequest(group_name='fr3_arm', pipeline_id='ompl',
             num_planning_attempts=10, allowed_planning_time=10., goal_constraints=[constraints],
             max_velocity_scaling_factor=0.25, max_acceleration_scaling_factor=0.25)
@@ -220,6 +284,11 @@ class Pick(Node):
             planning_options=PlanningOptions(plan_only=False, replan=False)), 120)
         if result.error_code.val != result.error_code.SUCCESS:
             raise RuntimeError(f'MoveIt error {result.error_code.val}')
+
+    def return_home(self):
+        self.set_status('RETURNING_HOME', 'Planning back to the initial joint posture')
+        self.move_joints(HOME)
+        self.set_status('AT_HOME', 'At initial posture; ready to observe the table')
 
     def hand(self, width):
         goal = GripperCommand.Goal()
@@ -246,9 +315,8 @@ class Pick(Node):
     def populate_scene(self, targets):
         scene = PlanningScene(is_diff=True)
         scene.robot_state.is_diff = True
-        xml = Path(get_package_share_directory('fr3_vision_grasp')) / 'scene/scene_grasp.xml'
         # Known static environment only. Movable object poses come exclusively from perception.
-        for body in ET.parse(xml).find('worldbody').findall('body'):
+        for body in ET.parse(self.scene_xml).find('worldbody').findall('body'):
             if body.find('freejoint') is not None:
                 continue
             origin = np.fromstring(body.get('pos', '0 0 0'), sep=' ')
@@ -262,13 +330,31 @@ class Pick(Node):
             scene.world.collision_objects.append(self.box('target_'+color, [p.x, p.y, p.z], [self.size]*3))
         self.apply(scene)
 
-    def allow_touch(self, allow, links=None):
+    def destination(self, color=None):
+        """Read the matching fixed bin, never the movable cube, from the scene."""
+        name = {'red': 'left_red_box', 'green': 'right_green_box',
+                'blue': 'right_blue_box'}[color or self.color]
+        body = ET.parse(self.scene_xml).find(f'worldbody/body[@name="{name}"]')
+        if body is None:
+            raise RuntimeError(f'Placement bin is missing: {name}')
+        origin = np.fromstring(body.get('pos'), sep=' ')
+        bottom = body.find(f'geom[@name="{name}_bottom"]')
+        center = origin + np.fromstring(bottom.get('pos'), sep=' ')
+        center[2] += np.fromstring(bottom.get('size'), sep=' ')[2] + self.size / 2
+        rim_z = max(origin[2] + np.fromstring(g.get('pos', '0 0 0'), sep=' ')[2]
+                    + np.fromstring(g.get('size'), sep=' ')[2] for g in body.findall('geom'))
+        # The palm is wider than the bin opening. Put the lower half of the
+        # cube below the rim, but keep the palm above it while opening.
+        release_z = max(center[2] + 0.006, rim_z - self.size / 2 + 0.005)
+        return center, bottom.get('name'), rim_z + 0.10, release_z
+
+    def allow_touch(self, allow, links=None, color=None):
         if not self.get_scene.wait_for_service(timeout_sec=10):
             raise RuntimeError('get_planning_scene unavailable')
         request = GetPlanningScene.Request(components=PlanningSceneComponents(
             components=PlanningSceneComponents.ALLOWED_COLLISION_MATRIX))
         matrix = self.wait(self.get_scene.call_async(request), 10).scene.allowed_collision_matrix
-        names = ['target_'+self.color, *(links if links is not None else ['fr3_leftfinger', 'fr3_rightfinger'])]
+        names = ['target_'+(color or self.color), *(links if links is not None else ['fr3_leftfinger', 'fr3_rightfinger'])]
         for name in names:
             if name not in matrix.entry_names:
                 matrix.entry_names.append(name)
@@ -296,26 +382,48 @@ class Pick(Node):
         # additional REMOVE in this diff fails in Humble after that removal.
         self.apply(scene)
 
+    def detach(self, position):
+        scene = PlanningScene(is_diff=True)
+        scene.robot_state.is_diff = True
+        scene.robot_state.attached_collision_objects = [AttachedCollisionObject(
+            link_name='fr3_hand_tcp', object=CollisionObject(
+                id='target_' + self.color, operation=CollisionObject.REMOVE))]
+        # Explicitly replace the detached world pose with the intended resting pose.
+        scene.world.collision_objects = [self.box('target_' + self.color, position, [self.size]*3)]
+        self.apply(scene)
+
     def stable_targets(self):
-        deadline = time.monotonic() + 15
+        # Discard images taken during motion; the home posture clears the camera view.
+        after_ns = self.get_clock().now().nanoseconds
+        empty = EmptyTableConfirmation(after_ns)
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if self.stop_requested.is_set():
+            if not self.running or self.stop_requested.is_set():
                 raise RuntimeError('Task canceled')
             valid = {}
-            now = self.get_clock().now()
+            now_ns = self.get_clock().now().nanoseconds
+            frames = [f for f in list(self.detection_frames) if after_ns < f[0] <= now_ns]
+            if not frames or time.monotonic() - frames[-1][2] > 2 or now_ns - frames[-1][0] > 1e9:
+                time.sleep(0.05)
+                continue
+            for stamp_ns, colors, _ in frames:
+                empty.observe(stamp_ns, colors)
             for color, history in self.samples.items():
-                messages = list(history)
-                if len(messages) < 5 or (now-Time.from_msg(messages[-1].header.stamp)).nanoseconds > 1e9:
+                messages = [m for m in list(history) if Time.from_msg(m.header.stamp).nanoseconds > after_ns]
+                if (color not in frames[-1][1] or len(messages) < 5 or
+                        now_ns - Time.from_msg(messages[-1].header.stamp).nanoseconds > 1e9):
                     continue
                 points = np.array([[m.pose.position.x, m.pose.position.y, m.pose.position.z] for m in messages])
                 if np.max(np.std(points, axis=0)) < 0.003:
                     valid[color] = copy.deepcopy(messages[-1])
-            if self.color in valid:
+            if valid:
                 return valid
+            if empty.confirmed(now_ns):
+                return {}
             time.sleep(0.05)
-        raise RuntimeError('No fresh stable target detected in 15 seconds')
+        raise RuntimeError('Cannot confirm a stable target or an empty table from fresh RGB-D frames in 30 seconds')
 
-    def evaluate(self, minimum_z, duration=0.5, timeout=8):
+    def evaluate(self, minimum_z, duration=2.0, timeout=15):
         """Ground truth is used for evaluation only, never for target or trajectory generation."""
         deadline, stable = time.monotonic()+timeout, None
         while time.monotonic() < deadline:
@@ -333,44 +441,113 @@ class Pick(Node):
             time.sleep(0.03)
         raise RuntimeError('Physical grasp verification failed: require two-finger contact and sustained object height')
 
+    def evaluate_placement(self, destination, duration=2.0, timeout=15):
+        deadline, stable = time.monotonic() + timeout, None
+        previous = None
+        while time.monotonic() < deadline:
+            if self.stop_requested.is_set() or not self.running:
+                raise RuntimeError('Task canceled')
+            metrics = self.metrics
+            obj = metrics.get('objects', {}).get(self.color) if metrics else None
+            valid = False
+            if obj and time.monotonic() - self.metric_wall < 2:
+                position = np.array(obj['position'])
+                # Inside the bin, resting on its floor, released and no longer moving.
+                valid = (not obj['contacts'] and
+                         np.max(np.abs(position[:2] - destination[:2])) < 0.045 and
+                         abs(position[2] - destination[2]) < 0.004 and
+                         (previous is None or np.linalg.norm(position - previous) < 0.001))
+                previous = position
+            if valid:
+                if stable is None:
+                    stable = metrics['sim_time']
+                if metrics['sim_time'] - stable >= duration:
+                    return
+            else:
+                stable = None
+            time.sleep(0.03)
+        raise RuntimeError('Placement verification failed: object must rest released inside the matching bin')
+
+    def pick_one(self, targets):
+        target = targets[self.color]
+        p = target.pose.position
+        center = np.array([p.x, p.y, p.z])
+        destination, support, clearance_z, release_z = self.destination()
+        travel_z = max(center[2] + self.get_parameter('lift_height').value, clearance_z)
+        self.populate_scene(targets)
+        self.allow_touch(False)
+        self.set_status('OPENING', 'Opening gripper')
+        opened = self.hand(0.08)
+        if not opened.reached_goal:
+            raise RuntimeError('Gripper failed to open fully')
+        self.set_status('APPROACHING', f'Planning above visual target {center.round(4).tolist()}')
+        self.move_to(center + [0, 0, self.get_parameter('approach_height').value])
+        self.allow_touch(True)
+        self.set_status('DESCENDING', 'Planning to grasp centre with downward tool orientation')
+        self.move_to(center, linear=True)
+        self.set_status('CLOSING', 'Closing until contact')
+        closed = self.hand(0.0)
+        if not closed.stalled or closed.position < 0.003:
+            raise RuntimeError('Empty closure: no object held between fingers')
+        if self.get_parameter('verify_simulation').value:
+            self.evaluate(center[2]-0.015, duration=0.2)
+        self.holding = True
+        self.monitor_grasp = True
+        self.contact_lost_since = None
+        self.attach(target)
+        # The grasped cube initially rests on its support surface. Permit
+        # only this object/support pair during the straight upward retreat.
+        self.allow_touch(True, ['table_top'])
+        self.set_status('LIFTING', 'Planning upward motion with attached collision object')
+        self.move_to([center[0], center[1], travel_z], linear=True)
+        if self.get_parameter('verify_simulation').value:
+            self.evaluate(center[2]+0.05)
+        self.allow_touch(False, ['table_top'])
+        self.set_status('TRANSPORTING', f'Moving above {self.color} bin with gripper closed')
+        above_bin = [destination[0], destination[1], travel_z]
+        self.move_to(above_bin, linear=True)
+        if self.get_parameter('verify_simulation').value:
+            self.evaluate(center[2] + 0.05, duration=0.5)
+        self.allow_touch(True, [support])
+        self.set_status('PLACING', 'Lowering into bin before releasing')
+        self.move_to([destination[0], destination[1], release_z], linear=True)
+        self.check_grasp()
+        self.set_status('RELEASING', 'Opening gripper inside bin')
+        self.monitor_grasp = False
+        opened = self.hand(0.08)
+        if not opened.reached_goal:
+            raise RuntimeError('Gripper failed to release fully')
+        self.holding = False
+        self.detach(destination)
+        self.set_status('RETREATING', 'Moving clear of the placed object')
+        self.move_to(above_bin, linear=True)
+        self.allow_touch(False)
+        self.set_status('VERIFYING', 'Checking object is released and settled inside bin')
+        if self.get_parameter('verify_simulation').value:
+            self.evaluate_placement(destination)
+        self.placed_colors.append(self.color)
+        self.set_status('OBJECT_PLACED', f'{self.color} placed; returning home before the next scan')
+
     def run_pick(self):
         try:
-            self.set_status('DETECTING', 'Waiting for stable RGB-D target')
-            targets = self.stable_targets()
-            target = targets[self.color]
-            p = target.pose.position
-            center = np.array([p.x, p.y, p.z])
-            self.populate_scene(targets)
-            self.allow_touch(False)
-            self.set_status('OPENING', 'Opening gripper')
-            opened = self.hand(0.08)
-            if not opened.reached_goal:
-                raise RuntimeError('Gripper failed to open fully')
-            self.set_status('APPROACHING', f'Planning above visual target {center.round(4).tolist()}')
-            self.move_to(center + [0, 0, self.get_parameter('approach_height').value])
-            self.allow_touch(True)
-            self.set_status('DESCENDING', 'Planning to grasp centre with downward tool orientation')
-            self.move_to(center, linear=True)
-            self.set_status('CLOSING', 'Closing until contact')
-            closed = self.hand(0.0)
-            if not closed.stalled or closed.position < 0.003:
-                raise RuntimeError('Empty closure: no object held between fingers')
-            if self.get_parameter('verify_simulation').value:
-                self.evaluate(center[2]-0.015, duration=0.2)
-            self.holding = True
-            self.attach(target)
-            # The grasped cube initially rests on its support surface. Permit
-            # only this object/support pair during the straight upward retreat.
-            self.allow_touch(True, ['table_top'])
-            self.set_status('LIFTING', 'Planning upward motion with attached collision object')
-            self.move_to(center + [0, 0, self.get_parameter('lift_height').value], linear=True)
-            if self.get_parameter('verify_simulation').value:
-                self.evaluate(center[2]+0.05)
-            self.allow_touch(False, ['table_top'])
-            self.set_status('SUCCEEDED', 'Object lifted and held; /pick/reset starts a new trial')
+            self.populate_scene({})
+            self.return_home()
+            while self.running and not self.stop_requested.is_set():
+                self.set_status('DETECTING', 'Checking the table for remaining blocks')
+                targets = self.stable_targets()
+                if not targets:
+                    self.completed = True
+                    self.set_status('SUCCEEDED',
+                        f'Table clear; placed {len(self.placed_colors)} blocks and stopped at initial posture')
+                    return
+                self.color = next(c for c in self.color_order if c in targets)
+                self.pick_one(targets)
+                self.return_home()
+            raise RuntimeError('Task canceled')
         except Exception as exc:
             self.set_status('CANCELED' if self.stop_requested.is_set() else 'FAILED', str(exc))
         finally:
+            self.monitor_grasp = False
             self.busy = False
 
 

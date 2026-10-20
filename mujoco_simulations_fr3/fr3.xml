@@ -4,7 +4,9 @@
 
   <compiler angle="radian" meshdir="assets"/>
 
-  <option integrator="implicitfast"/>
+  <!-- Suppress soft-contact tangential drift: without the no-slip pass a
+       stationary grasp creeps ~1.8 mm/s and eventually drops the cube. -->
+  <option integrator="implicitfast" noslip_iterations="5"/>
 
   <!-- =========================
        Default
