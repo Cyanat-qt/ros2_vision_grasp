@@ -1,5 +1,5 @@
 # FR3 Vision Grasping Simulation
-
+![Mujoco](images/mujoco.png)
 A Franka FR3 grasping demo based on **ROS 2 Humble + MoveIt 2 + MuJoCo**:
 
 **RGB-D Camera → OpenCV Color Detection → 3D Localization → Motion Planning → Physical Contact Grasping → Placement**
